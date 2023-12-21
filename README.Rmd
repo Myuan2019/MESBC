@@ -1,0 +1,155 @@
+# Mutually Exclusive Spectral Biclustering (MESBC) 
+
+We simulate an example of gene expression count data with five biclusters with the following size: 20×20, 50×20, 50×20, 30×40, and 100×50. It is assumed that the non-bicluster elements (i.e., the background noise) are randomly generated from a negative binomial distribution with a mean of mu0=0.1, and the elements within biclusters are sampled from a negative binomial distribution with a mean of mu=1. After generating data, shuffle it and record and save the real labels.
+
+
+```{r}
+library(pheatmap)
+library(scran)
+library(igraph)
+library(cluster)
+library(mclust)
+library(clue)
+library(ggplot2)
+
+##### Function of generating negative binomial distribution simulation data
+gendata_NBP=function(mu,mu0,size,rownum,colnum){
+  K=length(rownum)
+  N=sum(rownum)
+  P=sum(colnum)
+  n=rownum
+  p=colnum
+  
+  noise_data=matrix(rnbinom(N*P, mu = mu0, size = size),nrow=N,ncol=P) 
+  
+  for(i in 1:K){
+    
+    x=matrix(rnbinom(n[i]*p[i], mu = mu[i], size = size),nrow=n[i],ncol=p[i])
+    
+    if(i==1) noise_data[1:n[i],1:p[i]]=x
+    if(i>1) noise_data[(sum(n[1:(i-1)])+1):sum(n[1:i]),(sum(p[1:(i-1)])+1):sum(p[1:i])]=x
+  }
+  
+  return(noise_data)
+  
+}
+
+rbicnum=c(20,50,50,30,100)
+cbicnum=c(20,20,20,40,50)
+mu=rep(1,5)
+mu0=0.1
+size=1
+N=100
+ngene=sum(rbicnum)
+ncond=sum(cbicnum)
+rowend=colend=0
+for(i in 1:length(rbicnum)){
+  rowend[i+1]=sum(rbicnum[1:i])
+  colend[i+1]=sum(cbicnum[1:i])
+}
+truebic2=list()
+for(i in 1:(length(rowend)-1)){
+  truebic2$bicr[[paste0("bic",i)]]=(rowend[i]+1):rowend[i+1]
+  truebic2$bicc[[paste0("bic",i)]]=ngene+(colend[i]+1):colend[i+1]
+}
+data=gendata_NBP(mu,mu0,size,rbicnum,cbicnum)
+m=nrow(data)
+p=ncol(data)
+n=m+p
+indr=sample(1:m,m,replace = F)
+indc=sample(1:p,p,replace = F)
+truebic=truebic2
+for(i in 1:(length(rowend)-1)){
+    for(j in 1:length(truebic2[["bicr"]][[paste0("bic",i)]]))
+      truebic[["bicr"]][[paste0("bic",i)]][j]=which(indr==truebic2[["bicr"]][[paste0("bic",i)]][j])
+    
+    for(j in 1:length(truebic2[["bicc"]][[paste0("bic",i)]]))
+      truebic[["bicc"]][[paste0("bic",i)]][j]=which((indc+ngene)==truebic2[["bicc"]][[paste0("bic",i)]][j])+ngene
+    
+  }
+data2=data[indr,indc]
+
+```
+
+
+We use the MESBC method to perform bicluster analysis on the shuffled matrix. Traversing the results of clustering K from 2 to 10, select the clustering result corresponding to the maximum modularity value.
+
+```{r}
+MESBC <- function(data, K){
+  m = nrow(data)
+  p = ncol(data)
+  n = m+p
+  w = as.matrix(data+abs(min(0,range(data)[1])))
+  d1 = apply(w,1,sum)
+  d2 = apply(w,2,sum)
+  D1 = diag(1/d1^0.5)
+  D2 = diag(1/d2^0.5)
+  w.standard = D1%*%w%*%D2
+  mysvd = svd(w.standard)
+  
+  clust <- matrix(nrow=n,ncol=length(K))
+  colnames(clust)=K
+  for(k in K){
+    if (k <= p & k <= m){
+      u = mysvd$u[,1:k]; v = mysvd$v[,1:k]; lambda = mysvd$d[1:k]
+    }
+    if (k > p | k > m)
+    { u = mysvd$u ; v = mysvd$v }
+    u = as.matrix(u); v = as.matrix(v)
+    Y = rbind(D1%*%u,D2%*%v)%*%diag(lambda)
+    
+    clus.out = kmeans(Y,centers=k,iter.max=100,nstart=100)
+    clust[,as.character(k)] = clus.out$cluster
+  }
+  
+  if(length(K)==1) clust=clust[,1]
+  return(list(clus=clust, Y=rbind(D1%*%mysvd$u,D2%*%mysvd$v)%*%diag(mysvd$d)))
+}
+
+K=2:10
+bcout=MESBC(data2,K)
+g = buildSNNGraph(t(bcout[["Y"]]))
+distY=dist(bcout[["Y"]])
+  
+grouptmp=numeric()
+for(i in 1:(length(rowend)-1))
+    grouptmp[c(truebic[["bicr"]][[paste0("bic",i)]],truebic[["bicc"]][[paste0("bic",i)]])]=i
+mod=numeric()
+clus=list()
+  
+for(k in K){
+    clus$MESBC$row[[as.character(k)]]=bcout[["clus"]][1:m,as.character(k)]
+    clus$MESBC$col[[as.character(k)]]=bcout[["clus"]][(m+1):n,as.character(k)]
+    mod[k]=modularity(g,c(clus$MESBC$row[[as.character(k)]],clus$MESBC$col[[as.character(k)]]))
+}
+kbest=as.character(which(mod==max(mod,na.rm = T))[1])
+```
+
+
+Now let's take a look at the heatmaps of the raw data, shuffled data, and data rearranged by MESBC.
+
+```{r}
+# true block
+pheatmap::pheatmap(data,show_colnames =F,show_rownames = F,legend =F,
+                   cluster_rows = F,cluster_cols = F,
+                   annotation_colors =F,annotation_legend = F)
+
+
+# disturbed data
+pheatmap::pheatmap(data2,show_colnames =F,show_rownames = F,legend =F,
+                   cluster_rows = F,cluster_cols = F,
+                   annotation_colors =F,annotation_legend = F)
+
+# data rearranged by MESBC
+pheatmap::pheatmap(data2[order(clus[["MESBC"]][["row"]][[kbest]]),order(clus[["MESBC"]][["col"]][[kbest]])],
+                   show_colnames =F,show_rownames = F,legend =F,
+                   cluster_rows = F,cluster_cols = F,
+                   annotation_colors =F,annotation_legend = F)
+
+
+```
+
+It can be seen that MESBC can correctly identify the five designated blocks.
+
+
+We can also analyze multiple metrics of clustering performance, which requires multiple repeated experiments. The corresponding code is in "code for MESBC analysis.R".
